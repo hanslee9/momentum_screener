@@ -111,29 +111,62 @@ def get_universe(country: str, n: int) -> pd.DataFrame:
         return df[["ticker", "name", "market_cap"]]
 
     elif country == "US":
-        import FinanceDataReader as fdr
+        # FinanceDataReader의 NASDAQ/NYSE/AMEX 리스팅은 Symbol/Name/Industry만 제공하고
+        # 시가총액 컬럼이 없어(최신 버전 기준), 네이버 해외증시 API를 직접 호출한다.
+        # 이 API는 marketValue(시가총액) 기준으로 이미 정렬되어 반환되는 것으로 확인됨.
+        import requests
 
-        frames = []
-        for exch in ["NASDAQ", "NYSE", "AMEX"]:
-            try:
-                frames.append(fdr.StockListing(exch))
-            except Exception:
-                continue
-        if not frames:
-            raise ValueError("미국 종목 리스트를 가져오지 못했습니다.")
-        df = pd.concat(frames, ignore_index=True)
+        headers = {"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        exchanges = ["NASDAQ", "NYSE", "AMEX"]
+        rows = []
 
-        marcap_col = next((c for c in ["MarketCap", "Marcap", "시가총액"] if c in df.columns), None)
-        if marcap_col is None:
-            raise ValueError("미국 종목 시가총액 컬럼을 찾을 수 없습니다. FinanceDataReader 버전을 확인하세요.")
-        name_col = "Name" if "Name" in df.columns else df.columns[1]
-        ticker_col = "Symbol" if "Symbol" in df.columns else df.columns[0]
+        for exch in exchanges:
+            page = 1
+            fetched = 0
+            # 거래소별로 골고루 담되, 전체적으로는 이후 시가총액 기준 재정렬하므로 여유 있게 수집
+            while fetched < n and page <= 20:
+                url = f"http://api.stock.naver.com/stock/exchange/{exch}/marketValue?page={page}&pageSize=60"
+                try:
+                    resp = requests.get(url, headers=headers, timeout=10)
+                    jo = resp.json()
+                except Exception:
+                    break
 
-        df = df.dropna(subset=[marcap_col]).drop_duplicates(subset=[ticker_col])
-        df = df.sort_values(marcap_col, ascending=False).head(n).copy()
-        df["ticker"] = df[ticker_col]
-        df = df.rename(columns={name_col: "name", marcap_col: "market_cap"})
-        return df[["ticker", "name", "market_cap"]].reset_index(drop=True)
+                stocks = jo.get("stocks", [])
+                if not stocks:
+                    break
+
+                for s in stocks:
+                    symbol_raw = s.get("symbolCode", "")
+                    symbol = symbol_raw.split(".")[0]  # 네이버 표기(.O 등) 접미사 제거
+                    name = s.get("stockNameEng") or s.get("stockName") or symbol
+
+                    # 시가총액 관련 필드명이 API 문서화가 안 되어 있어 방어적으로 탐색
+                    marcap = None
+                    for key in s.keys():
+                        kl = key.lower()
+                        if "marketvalue" in kl or ("market" in kl and "cap" in kl):
+                            try:
+                                marcap = float(s[key])
+                            except (TypeError, ValueError):
+                                pass
+                            break
+
+                    rows.append({"ticker": symbol, "name": name, "market_cap": marcap})
+                    fetched += 1
+
+                page += 1
+
+        if not rows:
+            raise ValueError("미국 종목 리스트를 가져오지 못했습니다 (네이버 해외증시 API 응답 없음).")
+
+        df = pd.DataFrame(rows).drop_duplicates(subset=["ticker"])
+
+        if df["market_cap"].notna().any():
+            df = df.sort_values("market_cap", ascending=False)
+        # market_cap 필드를 못 찾은 경우, API 자체가 이미 시가총액순으로 반환한다고 가정하고 원래 순서 유지
+
+        return df.head(n).reset_index(drop=True)
 
     else:
         raise ValueError("country는 'KR' 또는 'US'만 지원합니다.")
