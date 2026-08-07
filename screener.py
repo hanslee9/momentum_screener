@@ -243,43 +243,81 @@ def compute_momentum_scores(price_matrix: pd.DataFrame, min_history_days: int = 
 
 
 # ------------------------------------------------------------------
-# 4. 간단 백테스트 (상위 K개 종목 동일가중 Buy & Hold)
+# 4. 간단 백테스트 (상위 K개 종목 동일가중 Buy & Hold + 종목별 개별 성과)
 # ------------------------------------------------------------------
-def run_simple_backtest(price_matrix: pd.DataFrame, tickers: list, initial_capital: float = 10_000_000) -> dict:
-    """
-    스크리닝으로 선정된 종목들을, 스크리닝에 사용한 가격 데이터 기간(약 13개월) 동안
-    동일가중으로 매수해 그대로 보유했다고 가정할 때의 성과를 계산한다.
-    (리밸런싱 없음, 거래비용 미반영 - 순수 참고용 approximation)
+def _compute_metrics_from_series(series: pd.Series) -> dict:
+    """가격(또는 자산가치) 시계열 하나에 대해 CAGR/MDD/총수익률/기간을 계산한다."""
+    series = series.dropna()
+    if len(series) < 2:
+        raise ValueError("데이터가 2개 미만이라 성과를 계산할 수 없습니다.")
 
-    반환: {'equity_curve': pd.Series, 'metrics': dict}
-    """
-    sub = price_matrix[tickers].dropna(how="any")
-    if sub.empty or len(sub) < 2:
-        raise ValueError("백테스트에 사용할 공통 가격 데이터가 부족합니다.")
+    start_date, end_date = series.index[0], series.index[-1]
+    n_days = (end_date - start_date).days
+    n_years = n_days / 365.25
 
-    normalized = sub / sub.iloc[0]  # 각 종목을 첫날 기준 1.0으로 정규화
-    portfolio_ratio = normalized.mean(axis=1)  # 동일가중 평균
-    equity_curve = portfolio_ratio * initial_capital
+    start_val, end_val = series.iloc[0], series.iloc[-1]
+    total_return = end_val / start_val - 1
+    cagr = (end_val / start_val) ** (1 / n_years) - 1 if n_years >= 30 / 365.25 else float("nan")
 
-    n_years = (equity_curve.index[-1] - equity_curve.index[0]).days / 365.25
-    end_value = equity_curve.iloc[-1]
-    total_return = end_value / initial_capital - 1
-    cagr = (end_value / initial_capital) ** (1 / n_years) - 1 if n_years > 0 else float("nan")
-
-    cum_max = equity_curve.cummax()
-    drawdown = equity_curve / cum_max - 1
+    cum_max = series.cummax()
+    drawdown = series / cum_max - 1
     mdd = drawdown.min()
 
-    metrics = {
-        "start_date": equity_curve.index[0],
-        "end_date": equity_curve.index[-1],
-        "initial_capital": initial_capital,
-        "end_value": end_value,
-        "total_return": total_return,
-        "cagr": cagr,
-        "mdd": mdd,
+    return {
+        "start_date": start_date, "end_date": end_date, "n_days": n_days,
+        "start_value": start_val, "end_value": end_val,
+        "total_return": total_return, "cagr": cagr, "mdd": mdd,
     }
-    return {"equity_curve": equity_curve, "metrics": metrics}
+
+
+def run_simple_backtest(price_matrix: pd.DataFrame, tickers: list, initial_capital: float = 10_000_000,
+                         start_date=None, end_date=None) -> dict:
+    """
+    선정된 종목들을 지정 기간 동안 각각 보유했을 때의 개별 성과와,
+    동일가중으로 묶었을 때의 포트폴리오 성과를 함께 계산한다.
+    (리밸런싱 없음, 거래비용 미반영 - 참고용 approximation)
+
+    start_date/end_date를 지정하면 해당 구간만 사용하고, 미지정 시 각 종목이 보유한
+    전체 데이터 범위를 사용한다 (종목별로 시작일이 다를 수 있음에 유의).
+
+    반환: {
+        'per_ticker': {ticker: {'series': pd.Series(정규화 자산가치), 'metrics': dict}},
+        'portfolio': {'series': pd.Series, 'metrics': dict},
+    }
+    """
+    sub = price_matrix[tickers].copy()
+    if start_date is not None:
+        sub = sub[sub.index >= pd.Timestamp(start_date)]
+    if end_date is not None:
+        sub = sub[sub.index <= pd.Timestamp(end_date)]
+
+    if sub.empty:
+        raise ValueError("지정한 기간에 해당하는 가격 데이터가 없습니다.")
+
+    per_ticker = {}
+    for t in tickers:
+        s = sub[t].dropna()
+        if len(s) < 2:
+            continue
+        equity = (s / s.iloc[0]) * initial_capital
+        m = _compute_metrics_from_series(equity)
+        per_ticker[t] = {"series": equity, "metrics": m}
+
+    if not per_ticker:
+        raise ValueError("백테스트 가능한 종목이 없습니다 (해당 기간 데이터 부족).")
+
+    # 포트폴리오: 공통으로 데이터가 있는 구간만 사용해 동일가중 평균
+    common = sub[list(per_ticker.keys())].dropna(how="any")
+    if len(common) < 2:
+        raise ValueError("종목들의 공통 거래일이 부족해 포트폴리오 성과를 계산할 수 없습니다.")
+    normalized = common / common.iloc[0]
+    portfolio_equity = normalized.mean(axis=1) * initial_capital
+    portfolio_metrics = _compute_metrics_from_series(portfolio_equity)
+
+    return {
+        "per_ticker": per_ticker,
+        "portfolio": {"series": portfolio_equity, "metrics": portfolio_metrics},
+    }
 
 
 # ------------------------------------------------------------------
@@ -325,18 +363,25 @@ def main():
     full.to_csv(args.out, index=False, encoding="utf-8-sig")
     print(f"\n[저장 완료] 전체 결과 -> {args.out}")
 
-    # --- 간단 백테스트: 선정된 K개 종목을 동일가중 Buy&Hold 했을 때 성과 ---
+    # --- 간단 백테스트: 선정된 K개 종목의 개별 성과 + 동일가중 포트폴리오 성과 ---
     try:
         bt = run_simple_backtest(price_matrix, top_k["ticker"].tolist(), args.capital)
-        m = bt["metrics"]
+
         print("\n" + "=" * 70)
-        print(f"간단 백테스트 (동일가중 Buy&Hold, {m['start_date'].date()} ~ {m['end_date'].date()})")
+        print("간단 백테스트 (종목별 개별 성과, Buy&Hold)")
         print("=" * 70)
-        print(f"{'초기 투자금':<15}: {m['initial_capital']:,.0f}")
-        print(f"{'최종 평가액':<15}: {m['end_value']:,.0f}")
-        print(f"{'총 수익률':<15}: {m['total_return']:.2%}")
-        print(f"{'CAGR':<15}: {m['cagr']:.2%}")
-        print(f"{'MDD':<15}: {m['mdd']:.2%}")
+        for t, info in bt["per_ticker"].items():
+            m = info["metrics"]
+            print(f"{t:<10} {m['start_date'].date()} ~ {m['end_date'].date()}  "
+                  f"총수익률 {m['total_return']:.2%}  CAGR {m['cagr']:.2%}  MDD {m['mdd']:.2%}")
+
+        pm = bt["portfolio"]["metrics"]
+        print("\n" + "-" * 70)
+        print(f"포트폴리오(동일가중) {pm['start_date'].date()} ~ {pm['end_date'].date()}")
+        print(f"{'최종 평가액':<15}: {pm['end_value']:,.0f}")
+        print(f"{'총 수익률':<15}: {pm['total_return']:.2%}")
+        print(f"{'CAGR':<15}: {pm['cagr']:.2%}")
+        print(f"{'MDD':<15}: {pm['mdd']:.2%}")
     except Exception as e:
         print(f"\n[백테스트 생략] {e}")
 

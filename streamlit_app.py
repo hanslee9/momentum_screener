@@ -88,26 +88,62 @@ if run:
         csv = scored.to_csv(index=False).encode("utf-8-sig")
         st.download_button("결과 CSV 다운로드", csv, "screener_result.csv", "text/csv")
 
-        # --- 간단 백테스트: 선정된 K개 종목을 동일가중 Buy&Hold 했을 때 성과 ---
-        st.subheader("📈 간단 백테스트 (동일가중 Buy & Hold)")
-        st.caption("스크리닝에 사용한 가격 데이터 기간(약 13개월) 동안, 선정된 종목을 동일가중으로 매수해 그대로 보유했다고 가정한 결과입니다. 리밸런싱·거래비용은 반영되지 않습니다.")
+        # --- 간단 백테스트: 선정된 K개 종목의 개별 성과 + 동일가중 포트폴리오 성과 ---
+        st.subheader("📈 간단 백테스트 (Buy & Hold)")
+        st.caption("선정된 종목을 지정 기간 동안 각각 매수해 그대로 보유했다고 가정한 결과입니다. 리밸런싱·거래비용은 반영되지 않습니다.")
 
-        capital = st.number_input("초기 투자금", min_value=100_000, value=10_000_000, step=100_000)
+        data_min = price_matrix.index.min().date()
+        data_max = price_matrix.index.max().date()
 
-        try:
-            bt = run_simple_backtest(price_matrix, top_k["ticker"].tolist(), capital)
-            m = bt["metrics"]
+        bt_col1, bt_col2, bt_col3 = st.columns(3)
+        with bt_col1:
+            bt_start = st.date_input("백테스트 시작일", value=data_min, min_value=data_min, max_value=data_max)
+        with bt_col2:
+            bt_end = st.date_input("백테스트 종료일", value=data_max, min_value=data_min, max_value=data_max)
+        with bt_col3:
+            capital = st.number_input("초기 투자금", min_value=100_000, value=10_000_000, step=100_000)
 
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("최종 평가액", f"{m['end_value']:,.0f}")
-            c2.metric("총 수익률", f"{m['total_return']:.2%}")
-            c3.metric("CAGR", f"{m['cagr']:.2%}")
-            c4.metric("MDD", f"{m['mdd']:.2%}")
+        if bt_start >= bt_end:
+            st.warning("시작일은 종료일보다 이전이어야 합니다.")
+        else:
+            try:
+                bt = run_simple_backtest(
+                    price_matrix, top_k["ticker"].tolist(), capital,
+                    start_date=bt_start, end_date=bt_end,
+                )
 
-            st.caption(f"기간: {m['start_date'].date()} ~ {m['end_date'].date()}")
-            st.line_chart(bt["equity_curve"])
-        except Exception as e:
-            st.warning(f"백테스트를 계산할 수 없습니다: {e}")
+                # --- 종목별 + 포트폴리오 성과 테이블 ---
+                name_map = dict(zip(universe["ticker"], universe["name"])) if source_mode != "직접 입력" else {}
+                table_rows = []
+                for t, info in bt["per_ticker"].items():
+                    m = info["metrics"]
+                    table_rows.append({
+                        "종목": name_map.get(t, t), "티커": t,
+                        "시작일": m["start_date"].date(), "종료일": m["end_date"].date(),
+                        "총수익률(%)": round(m["total_return"] * 100, 2),
+                        "CAGR(%)": round(m["cagr"] * 100, 2) if pd.notna(m["cagr"]) else None,
+                        "MDD(%)": round(m["mdd"] * 100, 2),
+                    })
+                pm = bt["portfolio"]["metrics"]
+                table_rows.append({
+                    "종목": "📊 포트폴리오(동일가중)", "티커": "-",
+                    "시작일": pm["start_date"].date(), "종료일": pm["end_date"].date(),
+                    "총수익률(%)": round(pm["total_return"] * 100, 2),
+                    "CAGR(%)": round(pm["cagr"] * 100, 2) if pd.notna(pm["cagr"]) else None,
+                    "MDD(%)": round(pm["mdd"] * 100, 2),
+                })
+                st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+
+                if (bt_end - bt_start).days < 30:
+                    st.caption("⚠️ 기간이 30일 미만이라 CAGR은 연환산 왜곡이 커서 표시하지 않았습니다.")
+
+                # --- 통합 자산곡선 차트 (종목별 + 포트폴리오) ---
+                chart_df = pd.DataFrame({name_map.get(t, t): info["series"] for t, info in bt["per_ticker"].items()})
+                chart_df["포트폴리오(동일가중)"] = bt["portfolio"]["series"]
+                st.line_chart(chart_df)
+
+            except Exception as e:
+                st.warning(f"백테스트를 계산할 수 없습니다: {e}")
 
     except Exception as e:
         st.error(f"오류 발생: {e}")
