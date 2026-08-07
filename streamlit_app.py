@@ -10,6 +10,7 @@ screener.py의 로직을 그대로 사용하되, 웹 UI로 입력값을 받고 �
 
 import streamlit as st
 import pandas as pd
+import altair as alt
 
 from screener import get_universe, fetch_price_matrix, compute_momentum_scores, run_simple_backtest
 
@@ -190,7 +191,30 @@ else:
             # --- 통합 자산곡선 차트 (종목별 + 포트폴리오) ---
             chart_df = pd.DataFrame({name_map.get(t, t): info["series"] for t, info in bt["per_ticker"].items()})
             chart_df["포트폴리오(동일가중)"] = bt["portfolio"]["series"]
-            st.line_chart(chart_df)
+
+            log_scale = st.checkbox(
+                "Y축 로그 스케일", value=True,
+                help="기간이 길거나 종목 간 등락폭 차이가 크면 로그 스케일이 비교하기 쉽습니다. 초반 구간이 0에 붙어 보이면 켜보세요.",
+            )
+            st.caption("Y축 단위: 각 종목에 초기 투자금을 단독 투자했다고 가정했을 때의 평가금액 (모든 선이 같은 시작값에서 출발)")
+
+            chart_long = chart_df.reset_index().melt(id_vars=chart_df.index.name or "index",
+                                                       var_name="종목", value_name="평가금액")
+            chart_long = chart_long.rename(columns={chart_df.index.name or "index": "날짜"})
+
+            y_scale = alt.Scale(type="log") if log_scale else alt.Scale(type="linear")
+            line_chart = (
+                alt.Chart(chart_long)
+                .mark_line()
+                .encode(
+                    x=alt.X("날짜:T", title="날짜"),
+                    y=alt.Y("평가금액:Q", scale=y_scale, title="평가금액"),
+                    color=alt.Color("종목:N", title="종목"),
+                    tooltip=["날짜:T", "종목:N", alt.Tooltip("평가금액:Q", format=",.0f")],
+                )
+                .interactive()
+            )
+            st.altair_chart(line_chart, use_container_width=True)
 
         except Exception as e:
             st.warning(f"백테스트를 계산할 수 없습니다: {e}")
