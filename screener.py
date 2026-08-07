@@ -30,6 +30,35 @@ TRADING_DAYS = {"1m": 21, "3m": 63, "6m": 126, "12m": 252}
 # 장기(12개월)에 가장 큰 비중 - 단기 노이즈에 덜 민감하도록 설계
 WEIGHTS = {"1m": 0.10, "3m": 0.20, "6m": 0.30, "12m": 0.40}
 
+# ------------------------------------------------------------------
+# ETF 대표 후보군 (지수/섹터/테마) - AUM 상위 M개를 이 안에서 추출
+# ETF는 시가총액 개념이 없고 종류가 너무 많아, 대표 후보군을 미리 정해두고
+# 그 안에서 AUM(순자산총액) 상위 M개만 뽑는 방식으로 개별종목과 함께 평가한다.
+# 레버리지/인버스 ETF는 장기투자 성향과 맞지 않아 제외.
+# 필요시 이 목록을 직접 편집해서 원하는 ETF를 추가/제거할 수 있다.
+# ------------------------------------------------------------------
+ETF_CANDIDATES = {
+    "US": [
+        # 대형 지수
+        "SPY", "VOO", "IVV", "QQQ", "QQQM", "DIA", "IWM", "VTI", "VUG", "VTV",
+        # 섹터 (SPDR)
+        "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLI", "XLB", "XLU", "XLC", "XLRE",
+        # 테마/반도체/기술
+        "SMH", "SOXX", "ARKK", "SKYY", "HACK", "ICLN", "JETS", "XBI",
+        # 채권/원자재/해외
+        "GLD", "SLV", "TLT", "IEF", "HYG", "LQD", "EEM", "EFA", "FXI", "KWEB", "EWJ", "EWZ",
+    ],
+    "KR": [
+        # 대표 지수
+        "069500.KS", "102110.KS", "229200.KS",  # KODEX200, TIGER200, KODEX코스닥150
+        # 섹터/테마
+        "091160.KS", "091170.KS", "117460.KS", "244620.KS",  # 반도체, 은행, 에너지화학, 2차전지산업
+        # 해외지수
+        "143850.KS", "133690.KS", "381170.KS", "379800.KS",  # TIGER S&P500, TIGER나스닥100, TIGER미국테크TOP10, KODEX미국S&P500TR
+        "195930.KS", "245710.KS",  # TIGER유럽, KINDEX베트남VN30
+    ],
+}
+
 
 # ------------------------------------------------------------------
 # 1. 유니버스 구성 (국가별 시가총액 상위 N개)
@@ -172,6 +201,57 @@ def get_universe(country: str, n: int) -> pd.DataFrame:
 
     else:
         raise ValueError("country는 'KR' 또는 'US'만 지원합니다.")
+
+
+# ------------------------------------------------------------------
+# 1-b. ETF 유니버스 구성 (대표 후보군 중 AUM 상위 M개)
+# ------------------------------------------------------------------
+def get_etf_universe(country: str, m: int) -> pd.DataFrame:
+    """
+    ETF_CANDIDATES 후보군에서 AUM(순자산총액) 상위 m개를 추출한다.
+    yfinance의 totalAssets 필드를 사용하며, 조회 실패한 ETF는 자동 제외한다.
+    반환: columns=['ticker', 'name', 'market_cap', 'asset_type']  (market_cap 자리에 AUM을 넣어 스키마 통일)
+    """
+    import yfinance as yf
+
+    country = country.upper()
+    candidates = ETF_CANDIDATES.get(country, [])
+    rows = []
+
+    for t in candidates:
+        try:
+            info = yf.Ticker(t).info
+            aum = info.get("totalAssets")
+            name = info.get("longName") or info.get("shortName") or t
+            if aum:
+                rows.append({"ticker": t, "name": name, "market_cap": float(aum)})
+        except Exception:
+            continue
+
+    if not rows:
+        raise ValueError("ETF 후보군에서 AUM 데이터를 가져오지 못했습니다.")
+
+    df = pd.DataFrame(rows).sort_values("market_cap", ascending=False).head(m).reset_index(drop=True)
+    df["asset_type"] = "ETF"
+    return df
+
+
+def get_combined_universe(country: str, n_stocks: int, m_etfs: int) -> pd.DataFrame:
+    """개별종목 상위 N개 + ETF 상위 M개를 하나의 유니버스로 합친다."""
+    parts = []
+    if n_stocks > 0:
+        stocks = get_universe(country, n_stocks)
+        stocks["asset_type"] = "종목"
+        parts.append(stocks)
+    if m_etfs > 0:
+        etfs = get_etf_universe(country, m_etfs)
+        parts.append(etfs)
+
+    if not parts:
+        raise ValueError("종목 수(N)와 ETF 수(M)가 모두 0입니다.")
+
+    combined = pd.concat(parts, ignore_index=True).drop_duplicates(subset=["ticker"])
+    return combined
 
 
 # ------------------------------------------------------------------
@@ -325,15 +405,20 @@ def run_simple_backtest(price_matrix: pd.DataFrame, tickers: list, initial_capit
 # ------------------------------------------------------------------
 # 5. 전체 파이프라인
 # ------------------------------------------------------------------
-def run_screener(country: str, n: int, k: int, lookback_days: int = 420):
-    universe = get_universe(country, n)
-    print(f"[1/3] 유니버스 구성 완료: {country} 시가총액 상위 {len(universe)}개")
+def run_screener(country: str, n: int, k: int, lookback_days: int = 420, m_etfs: int = 0):
+    if m_etfs > 0:
+        universe = get_combined_universe(country, n, m_etfs)
+        print(f"[1/3] 유니버스 구성 완료: {country} 종목 {n}개 + ETF {m_etfs}개 (실제 {len(universe)}개)")
+    else:
+        universe = get_universe(country, n)
+        universe["asset_type"] = "종목"
+        print(f"[1/3] 유니버스 구성 완료: {country} 시가총액 상위 {len(universe)}개")
 
     price_matrix = fetch_price_matrix(universe["ticker"].tolist(), lookback_days=lookback_days)
     print(f"[2/3] 가격 데이터 다운로드 완료: {price_matrix.shape[1]}개 종목, {price_matrix.shape[0]}거래일")
 
     scored = compute_momentum_scores(price_matrix)
-    scored = scored.merge(universe[["ticker", "name", "market_cap"]], on="ticker", how="left")
+    scored = scored.merge(universe[["ticker", "name", "market_cap", "asset_type"]], on="ticker", how="left")
     scored = scored.sort_values("score", ascending=False).reset_index(drop=True)
     print(f"[3/3] 모멘텀 점수 계산 완료: {len(scored)}개 종목 (데이터 부족 종목 제외)")
 
@@ -353,9 +438,11 @@ def main():
     parser.add_argument("--capital", type=float, default=10_000_000, help="백테스트 초기 투자금 (기본 1000만)")
     parser.add_argument("--lookback-days", type=int, default=420,
                          help="가격 데이터 조회 기간(일). 백테스트를 더 긴 과거로 하려면 늘리세요 (기본 420일=약 13개월)")
+    parser.add_argument("--m-etfs", type=int, default=0, help="포함할 ETF 개수 (0이면 ETF 미포함, 기본 0)")
     args = parser.parse_args()
 
-    top_k, full, price_matrix = run_screener(args.country, args.n, args.k, lookback_days=args.lookback_days)
+    top_k, full, price_matrix = run_screener(args.country, args.n, args.k,
+                                              lookback_days=args.lookback_days, m_etfs=args.m_etfs)
 
     print("\n" + "=" * 70)
     print(f"모멘텀 점수 상위 {args.k}개 종목 ({args.country}, 후보군 {args.n}개 중)")
