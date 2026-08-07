@@ -78,7 +78,10 @@ def render_section(section_key: str, universe_label: str, is_etf: bool):
 
             with st.spinner("모멘텀 점수 계산 중..."):
                 scored = compute_momentum_scores(price_matrix)
-                scored = scored.merge(universe[["ticker", "name", "market_cap"]], on="ticker", how="left")
+                merge_cols = ["ticker", "name", "market_cap"]
+                if "size_source" in universe.columns:
+                    merge_cols.append("size_source")
+                scored = scored.merge(universe[merge_cols], on="ticker", how="left")
                 scored = scored.sort_values("score", ascending=False).reset_index(drop=True)
 
             top_k = scored.head(int(k))
@@ -105,12 +108,20 @@ def render_section(section_key: str, universe_label: str, is_etf: bool):
     st.success(f"유니버스 구성 완료: {result['n_universe']}개")
 
     cap_label = "AUM" if is_etf else "시가총액"
+    top_cols = ["ticker", "name", "score", "R_1m", "R_3m", "R_6m", "R_12m", "market_cap"]
+    top_col_names = ["티커", "이름", "점수(%)", "1개월(%)", "3개월(%)", "6개월(%)", "12개월(%)", cap_label]
+    if is_etf and "size_source" in top_k.columns:
+        top_cols.append("size_source")
+        top_col_names.append("규모 산정방식")
+
     st.subheader(f"🏆 모멘텀 점수 상위 {len(top_k)}개")
-    display_top = top_k[["ticker", "name", "score", "R_1m", "R_3m", "R_6m", "R_12m", "market_cap"]].copy()
+    display_top = top_k[top_cols].copy()
     for c in ["score", "R_1m", "R_3m", "R_6m", "R_12m"]:
         display_top[c] = (display_top[c] * 100).round(2)
-    display_top.columns = ["티커", "이름", "점수(%)", "1개월(%)", "3개월(%)", "6개월(%)", "12개월(%)", cap_label]
+    display_top.columns = top_col_names
     st.dataframe(display_top, use_container_width=True, hide_index=True)
+    if is_etf and "size_source" in top_k.columns and (top_k["size_source"] == "거래대금(추정)").any():
+        st.caption("⚠️ 일부 ETF는 AUM 데이터가 없어 최근 1개월 평균 거래대금으로 규모를 추정했습니다.")
 
     st.subheader("📋 전체 후보군 결과")
     st.caption(f"유효 {len(scored)}개 (데이터 부족 제외됨)")

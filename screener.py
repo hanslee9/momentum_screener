@@ -208,9 +208,10 @@ def get_universe(country: str, n: int) -> pd.DataFrame:
 # ------------------------------------------------------------------
 def get_etf_universe(country: str, m: int) -> pd.DataFrame:
     """
-    ETF_CANDIDATES 후보군에서 AUM(순자산총액) 상위 m개를 추출한다.
-    yfinance의 totalAssets 필드를 사용하며, 조회 실패한 ETF는 자동 제외한다.
-    반환: columns=['ticker', 'name', 'market_cap', 'asset_type']  (market_cap 자리에 AUM을 넣어 스키마 통일)
+    ETF_CANDIDATES 후보군에서 규모 상위 m개를 추출한다.
+    1순위: yfinance의 totalAssets(AUM) 필드
+    2순위: AUM 정보가 없으면(한국 ETF 등에서 흔함) 최근 1개월 평균 거래대금으로 대체
+    반환: columns=['ticker', 'name', 'market_cap', 'size_source', 'asset_type']
     """
     import yfinance as yf
 
@@ -219,17 +220,43 @@ def get_etf_universe(country: str, m: int) -> pd.DataFrame:
     rows = []
 
     for t in candidates:
+        size = None
+        size_source = None
+        name = t
+
         try:
             info = yf.Ticker(t).info
-            aum = info.get("totalAssets")
             name = info.get("longName") or info.get("shortName") or t
+            aum = info.get("totalAssets")
             if aum:
-                rows.append({"ticker": t, "name": name, "market_cap": float(aum)})
+                size = float(aum)
+                size_source = "AUM"
         except Exception:
-            continue
+            pass
+
+        if size is None:
+            # AUM 정보가 없으면 최근 1개월 평균 거래대금(가격*거래량)으로 규모를 근사
+            try:
+                hist = yf.download(t, period="1mo", progress=False, auto_adjust=True)
+                if not hist.empty:
+                    close = hist["Close"]
+                    volume = hist["Volume"]
+                    if isinstance(close, pd.DataFrame):
+                        close = close.iloc[:, 0]
+                    if isinstance(volume, pd.DataFrame):
+                        volume = volume.iloc[:, 0]
+                    dollar_vol = (close * volume).mean()
+                    if dollar_vol and dollar_vol > 0:
+                        size = float(dollar_vol)
+                        size_source = "거래대금(추정)"
+            except Exception:
+                pass
+
+        if size is not None:
+            rows.append({"ticker": t, "name": name, "market_cap": size, "size_source": size_source})
 
     if not rows:
-        raise ValueError("ETF 후보군에서 AUM 데이터를 가져오지 못했습니다.")
+        raise ValueError("ETF 후보군에서 규모 데이터를 가져오지 못했습니다 (AUM·거래대금 모두 조회 실패).")
 
     df = pd.DataFrame(rows).sort_values("market_cap", ascending=False).head(m).reset_index(drop=True)
     df["asset_type"] = "ETF"
