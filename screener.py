@@ -243,9 +243,49 @@ def compute_momentum_scores(price_matrix: pd.DataFrame, min_history_days: int = 
 
 
 # ------------------------------------------------------------------
-# 4. 전체 파이프라인
+# 4. 간단 백테스트 (상위 K개 종목 동일가중 Buy & Hold)
 # ------------------------------------------------------------------
-def run_screener(country: str, n: int, k: int) -> pd.DataFrame:
+def run_simple_backtest(price_matrix: pd.DataFrame, tickers: list, initial_capital: float = 10_000_000) -> dict:
+    """
+    스크리닝으로 선정된 종목들을, 스크리닝에 사용한 가격 데이터 기간(약 13개월) 동안
+    동일가중으로 매수해 그대로 보유했다고 가정할 때의 성과를 계산한다.
+    (리밸런싱 없음, 거래비용 미반영 - 순수 참고용 approximation)
+
+    반환: {'equity_curve': pd.Series, 'metrics': dict}
+    """
+    sub = price_matrix[tickers].dropna(how="any")
+    if sub.empty or len(sub) < 2:
+        raise ValueError("백테스트에 사용할 공통 가격 데이터가 부족합니다.")
+
+    normalized = sub / sub.iloc[0]  # 각 종목을 첫날 기준 1.0으로 정규화
+    portfolio_ratio = normalized.mean(axis=1)  # 동일가중 평균
+    equity_curve = portfolio_ratio * initial_capital
+
+    n_years = (equity_curve.index[-1] - equity_curve.index[0]).days / 365.25
+    end_value = equity_curve.iloc[-1]
+    total_return = end_value / initial_capital - 1
+    cagr = (end_value / initial_capital) ** (1 / n_years) - 1 if n_years > 0 else float("nan")
+
+    cum_max = equity_curve.cummax()
+    drawdown = equity_curve / cum_max - 1
+    mdd = drawdown.min()
+
+    metrics = {
+        "start_date": equity_curve.index[0],
+        "end_date": equity_curve.index[-1],
+        "initial_capital": initial_capital,
+        "end_value": end_value,
+        "total_return": total_return,
+        "cagr": cagr,
+        "mdd": mdd,
+    }
+    return {"equity_curve": equity_curve, "metrics": metrics}
+
+
+# ------------------------------------------------------------------
+# 5. 전체 파이프라인
+# ------------------------------------------------------------------
+def run_screener(country: str, n: int, k: int):
     universe = get_universe(country, n)
     print(f"[1/3] 유니버스 구성 완료: {country} 시가총액 상위 {len(universe)}개")
 
@@ -258,7 +298,7 @@ def run_screener(country: str, n: int, k: int) -> pd.DataFrame:
     print(f"[3/3] 모멘텀 점수 계산 완료: {len(scored)}개 종목 (데이터 부족 종목 제외)")
 
     top_k = scored.head(k).copy()
-    return top_k, scored
+    return top_k, scored, price_matrix
 
 
 # ------------------------------------------------------------------
@@ -270,9 +310,10 @@ def main():
     parser.add_argument("--n", type=int, default=50, help="시가총액 상위 몇 개를 후보군으로 볼지 (기본 50)")
     parser.add_argument("--k", type=int, default=3, help="최종 몇 개 종목을 선별할지 (기본 3)")
     parser.add_argument("--out", default="screener_result.csv", help="전체 결과 저장 경로")
+    parser.add_argument("--capital", type=float, default=10_000_000, help="백테스트 초기 투자금 (기본 1000만)")
     args = parser.parse_args()
 
-    top_k, full = run_screener(args.country, args.n, args.k)
+    top_k, full, price_matrix = run_screener(args.country, args.n, args.k)
 
     print("\n" + "=" * 70)
     print(f"모멘텀 점수 상위 {args.k}개 종목 ({args.country}, 후보군 {args.n}개 중)")
@@ -283,6 +324,21 @@ def main():
 
     full.to_csv(args.out, index=False, encoding="utf-8-sig")
     print(f"\n[저장 완료] 전체 결과 -> {args.out}")
+
+    # --- 간단 백테스트: 선정된 K개 종목을 동일가중 Buy&Hold 했을 때 성과 ---
+    try:
+        bt = run_simple_backtest(price_matrix, top_k["ticker"].tolist(), args.capital)
+        m = bt["metrics"]
+        print("\n" + "=" * 70)
+        print(f"간단 백테스트 (동일가중 Buy&Hold, {m['start_date'].date()} ~ {m['end_date'].date()})")
+        print("=" * 70)
+        print(f"{'초기 투자금':<15}: {m['initial_capital']:,.0f}")
+        print(f"{'최종 평가액':<15}: {m['end_value']:,.0f}")
+        print(f"{'총 수익률':<15}: {m['total_return']:.2%}")
+        print(f"{'CAGR':<15}: {m['cagr']:.2%}")
+        print(f"{'MDD':<15}: {m['mdd']:.2%}")
+    except Exception as e:
+        print(f"\n[백테스트 생략] {e}")
 
 
 if __name__ == "__main__":

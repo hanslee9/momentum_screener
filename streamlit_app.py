@@ -7,7 +7,7 @@ screener.py의 로직을 그대로 사용하되, 웹 UI로 입력값을 받고 �
 import streamlit as st
 import pandas as pd
 
-from screener import get_universe, fetch_price_matrix, compute_momentum_scores
+from screener import get_universe, fetch_price_matrix, compute_momentum_scores, run_simple_backtest
 
 st.set_page_config(page_title="상대모멘텀 스크리너", layout="wide")
 
@@ -87,6 +87,27 @@ if run:
 
         csv = scored.to_csv(index=False).encode("utf-8-sig")
         st.download_button("결과 CSV 다운로드", csv, "screener_result.csv", "text/csv")
+
+        # --- 간단 백테스트: 선정된 K개 종목을 동일가중 Buy&Hold 했을 때 성과 ---
+        st.subheader("📈 간단 백테스트 (동일가중 Buy & Hold)")
+        st.caption("스크리닝에 사용한 가격 데이터 기간(약 13개월) 동안, 선정된 종목을 동일가중으로 매수해 그대로 보유했다고 가정한 결과입니다. 리밸런싱·거래비용은 반영되지 않습니다.")
+
+        capital = st.number_input("초기 투자금", min_value=100_000, value=10_000_000, step=100_000)
+
+        try:
+            bt = run_simple_backtest(price_matrix, top_k["ticker"].tolist(), capital)
+            m = bt["metrics"]
+
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("최종 평가액", f"{m['end_value']:,.0f}")
+            c2.metric("총 수익률", f"{m['total_return']:.2%}")
+            c3.metric("CAGR", f"{m['cagr']:.2%}")
+            c4.metric("MDD", f"{m['mdd']:.2%}")
+
+            st.caption(f"기간: {m['start_date'].date()} ~ {m['end_date'].date()}")
+            st.line_chart(bt["equity_curve"])
+        except Exception as e:
+            st.warning(f"백테스트를 계산할 수 없습니다: {e}")
 
     except Exception as e:
         st.error(f"오류 발생: {e}")
