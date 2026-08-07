@@ -17,7 +17,7 @@ from screener import get_universe, fetch_price_matrix, compute_momentum_scores, 
 st.set_page_config(page_title="상대모멘텀 스크리너", layout="wide")
 
 st.markdown(
-    "<h3 style='margin-bottom:0;'>📊 상대모멘텀 스크리너</h3>",
+    "<h5 style='margin-bottom:0;'>📊 상대모멘텀 스크리너</h5>",
     unsafe_allow_html=True,
 )
 st.caption("시가총액 상위 N개 종목 중, 1/3/6/12개월 가중평균 수익률(40/30/20/10%) 상위 K개를 선별합니다.")
@@ -154,16 +154,40 @@ else:
     with bt_col3:
         capital = st.number_input("초기 투자금", min_value=100_000, value=10_000_000, step=100_000, key="bt_capital")
 
+    extra_input = st.text_input(
+        "비교용 종목 추가 (선택, 쉼표로 구분)",
+        placeholder="예: 005930.KS (삼성전자)",
+        help="선정된 종목 외에 비교하고 싶은 종목을 티커로 입력하세요. 예: 005930.KS, AAPL",
+        key="bt_extra_tickers",
+    )
+    extra_tickers = [t.strip() for t in extra_input.split(",") if t.strip()]
+
     if bt_start >= bt_end:
         st.warning("시작일은 종료일보다 이전이어야 합니다.")
     else:
         try:
+            bt_tickers = list(top_k["ticker"]) 
+            bt_price_matrix = price_matrix
+
+            # 비교용으로 추가한 종목 중, 기존 가격 데이터에 없는 것만 추가로 다운로드
+            missing = [t for t in extra_tickers if t not in bt_price_matrix.columns]
+            if missing:
+                with st.spinner(f"비교 종목 가격 데이터 다운로드 중... ({', '.join(missing)})"):
+                    from screener import fetch_price_matrix as _fetch
+                    extra_prices = _fetch(missing, lookback_days=lookback_days)
+                bt_price_matrix = bt_price_matrix.join(extra_prices, how="outer")
+
+            for t in extra_tickers:
+                if t not in bt_tickers:
+                    bt_tickers.append(t)
+
             bt = run_simple_backtest(
-                price_matrix, top_k["ticker"].tolist(), capital,
+                bt_price_matrix, bt_tickers, capital,
                 start_date=bt_start, end_date=bt_end,
             )
 
             # --- 종목별 + 포트폴리오 성과 테이블 ---
+            # name_map에 없는 티커(직접 추가한 비교 종목 등)는 티커 자체를 이름으로 표시
             name_map = dict(zip(universe["ticker"], universe["name"])) if res_source_mode != "직접 입력" else {}
             table_rows = []
             for t, info in bt["per_ticker"].items():
@@ -203,6 +227,7 @@ else:
             chart_long = chart_long.rename(columns={chart_df.index.name or "index": "날짜"})
 
             y_scale = alt.Scale(type="log") if log_scale else alt.Scale(type="linear")
+            legend_selection = alt.selection_point(fields=["종목"], bind="legend")
             line_chart = (
                 alt.Chart(chart_long)
                 .mark_line()
@@ -210,10 +235,13 @@ else:
                     x=alt.X("날짜:T", title="날짜"),
                     y=alt.Y("평가금액:Q", scale=y_scale, title="평가금액"),
                     color=alt.Color("종목:N", title="종목"),
+                    opacity=alt.condition(legend_selection, alt.value(1), alt.value(0.08)),
                     tooltip=["날짜:T", "종목:N", alt.Tooltip("평가금액:Q", format=",.0f")],
                 )
+                .add_params(legend_selection)
                 .interactive()
             )
+            st.caption("💡 범례의 종목명을 클릭하면 해당 선만 강조됩니다 (Shift+클릭으로 여러 개 선택, 빈 공간 클릭 시 초기화)")
             st.altair_chart(line_chart, use_container_width=True)
 
         except Exception as e:
