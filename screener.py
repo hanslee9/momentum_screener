@@ -323,11 +323,11 @@ def run_simple_backtest(price_matrix: pd.DataFrame, tickers: list, initial_capit
 # ------------------------------------------------------------------
 # 5. 전체 파이프라인
 # ------------------------------------------------------------------
-def run_screener(country: str, n: int, k: int):
+def run_screener(country: str, n: int, k: int, lookback_days: int = 420):
     universe = get_universe(country, n)
     print(f"[1/3] 유니버스 구성 완료: {country} 시가총액 상위 {len(universe)}개")
 
-    price_matrix = fetch_price_matrix(universe["ticker"].tolist())
+    price_matrix = fetch_price_matrix(universe["ticker"].tolist(), lookback_days=lookback_days)
     print(f"[2/3] 가격 데이터 다운로드 완료: {price_matrix.shape[1]}개 종목, {price_matrix.shape[0]}거래일")
 
     scored = compute_momentum_scores(price_matrix)
@@ -349,9 +349,11 @@ def main():
     parser.add_argument("--k", type=int, default=3, help="최종 몇 개 종목을 선별할지 (기본 3)")
     parser.add_argument("--out", default="screener_result.csv", help="전체 결과 저장 경로")
     parser.add_argument("--capital", type=float, default=10_000_000, help="백테스트 초기 투자금 (기본 1000만)")
+    parser.add_argument("--lookback-days", type=int, default=420,
+                         help="가격 데이터 조회 기간(일). 백테스트를 더 긴 과거로 하려면 늘리세요 (기본 420일=약 13개월)")
     args = parser.parse_args()
 
-    top_k, full, price_matrix = run_screener(args.country, args.n, args.k)
+    top_k, full, price_matrix = run_screener(args.country, args.n, args.k, lookback_days=args.lookback_days)
 
     print("\n" + "=" * 70)
     print(f"모멘텀 점수 상위 {args.k}개 종목 ({args.country}, 후보군 {args.n}개 중)")

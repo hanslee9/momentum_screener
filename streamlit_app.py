@@ -43,6 +43,19 @@ with col2:
 with col3:
     k = st.number_input("최종 선별 종목 수 (K)", min_value=1, max_value=50, value=3, step=1)
 
+lookback_options = {
+    "13개월 (기본, 모멘텀 점수 계산에 필요한 최소 기간)": 420,
+    "3년": 1095,
+    "5년": 1825,
+    "10년": 3650,
+}
+lookback_label = st.selectbox(
+    "가격 데이터 조회 기간",
+    options=list(lookback_options.keys()),
+    help="모멘텀 점수는 항상 최근 13개월 데이터로 계산됩니다. 기간을 늘리면 백테스트에서 더 과거 날짜까지 선택할 수 있지만, 데이터 다운로드 시간이 길어집니다.",
+)
+lookback_days = lookback_options[lookback_label]
+
 manual_tickers = None
 if source_mode == "직접 입력":
     ticker_hint = "예: 005930.KS, 000660.KS, 035420.KS" if country == "KR" else "예: AAPL, MSFT, NVDA"
@@ -65,8 +78,8 @@ if run:
             with st.spinner(f"{country} 시가총액 상위 {n}개 유니버스 구성 중..."):
                 universe = get_universe(country, int(n))
 
-        with st.spinner("가격 데이터 다운로드 중... (종목 수에 따라 1~3분 소요될 수 있습니다)"):
-            price_matrix = fetch_price_matrix(universe["ticker"].tolist())
+        with st.spinner(f"가격 데이터 다운로드 중... ({lookback_label} 기준, 종목 수에 따라 시간이 걸릴 수 있습니다)"):
+            price_matrix = fetch_price_matrix(universe["ticker"].tolist(), lookback_days=lookback_days)
 
         with st.spinner("모멘텀 점수 계산 중..."):
             scored = compute_momentum_scores(price_matrix)
