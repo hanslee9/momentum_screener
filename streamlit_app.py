@@ -11,19 +11,36 @@ from screener import get_universe, fetch_price_matrix, compute_momentum_scores
 
 st.set_page_config(page_title="상대모멘텀 스크리너", layout="wide")
 
-st.title("📊 상대모멘텀 스크리너")
+st.markdown(
+    "<h3 style='margin-bottom:0;'>📊 상대모멘텀 스크리너</h3>",
+    unsafe_allow_html=True,
+)
 st.caption("시가총액 상위 N개 종목 중, 1/3/6/12개월 가중평균 수익률(40/30/20/10%) 상위 K개를 선별합니다.")
 
 # ------------------------------------------------------------------
 # 입력값
 # ------------------------------------------------------------------
+source_mode = st.radio(
+    "종목군 소스",
+    options=["자동 (시가총액 상위)", "직접 입력"],
+    horizontal=True,
+    help="자동 조회가 서버 차단 등으로 실패할 경우 '직접 입력'으로 전환해 사용하세요.",
+)
+
 col1, col2, col3 = st.columns(3)
 with col1:
     country = st.selectbox("국가", options=["KR", "US"], format_func=lambda x: "한국" if x == "KR" else "미국")
 with col2:
-    n = st.number_input("후보군 크기 (시가총액 상위 N개)", min_value=5, max_value=300, value=50, step=5)
+    n = st.number_input("후보군 크기 (시가총액 상위 N개)", min_value=5, max_value=300, value=50, step=5,
+                         disabled=(source_mode == "직접 입력"))
 with col3:
     k = st.number_input("최종 선별 종목 수 (K)", min_value=1, max_value=50, value=3, step=1)
+
+manual_tickers = None
+if source_mode == "직접 입력":
+    ticker_hint = "예: 005930.KS, 000660.KS, 035420.KS" if country == "KR" else "예: AAPL, MSFT, NVDA"
+    manual_input = st.text_area("티커 목록 (쉼표로 구분)", placeholder=ticker_hint, height=80)
+    manual_tickers = [t.strip() for t in manual_input.split(",") if t.strip()]
 
 run = st.button("스크리닝 실행", type="primary")
 
@@ -32,9 +49,16 @@ run = st.button("스크리닝 실행", type="primary")
 # ------------------------------------------------------------------
 if run:
     try:
-        with st.spinner(f"{country} 시가총액 상위 {n}개 유니버스 구성 중..."):
-            universe = get_universe(country, int(n))
-        st.success(f"유니버스 구성 완료: {len(universe)}개 종목")
+        if source_mode == "직접 입력":
+            if not manual_tickers:
+                st.warning("티커를 하나 이상 입력해주세요.")
+                st.stop()
+            universe = pd.DataFrame({"ticker": manual_tickers, "name": manual_tickers, "market_cap": None})
+            st.success(f"직접 입력한 {len(universe)}개 종목으로 진행합니다.")
+        else:
+            with st.spinner(f"{country} 시가총액 상위 {n}개 유니버스 구성 중..."):
+                universe = get_universe(country, int(n))
+            st.success(f"유니버스 구성 완료: {len(universe)}개 종목")
 
         with st.spinner("가격 데이터 다운로드 중... (종목 수에 따라 1~3분 소요될 수 있습니다)"):
             price_matrix = fetch_price_matrix(universe["ticker"].tolist())

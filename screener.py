@@ -39,30 +39,80 @@ def get_universe(country: str, n: int) -> pd.DataFrame:
     ticker는 yfinance 조회에 바로 쓸 수 있는 형태로 반환한다
     (한국: 종목코드+.KS/.KQ 접미사, 미국: 티커 그대로)
     """
-    import FinanceDataReader as fdr
-
     country = country.upper()
 
     if country == "KR":
-        df = fdr.StockListing("KRX")
-        # FinanceDataReader 버전에 따라 컬럼명이 'Marcap' 또는 'MarketCap' 등으로 다를 수 있어 방어적으로 처리
-        marcap_col = next((c for c in ["Marcap", "MarketCap", "시가총액"] if c in df.columns), None)
-        if marcap_col is None:
-            raise ValueError("KRX 시가총액 컬럼을 찾을 수 없습니다. FinanceDataReader 버전을 확인하세요.")
+        # data.krx.co.kr 직접 호출(FinanceDataReader, pykrx 공통)은 클라우드/데이터센터 IP를
+        # KRX 서버가 차단하는 사례가 많아, 상대적으로 안정적인 네이버 금융 페이지를 파싱한다.
+        import requests
+        from bs4 import BeautifulSoup
 
-        df = df.dropna(subset=[marcap_col]).sort_values(marcap_col, ascending=False)
-        df = df.head(n).copy()
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        rows = []
+        page = 1
+        max_pages = 20  # 페이지당 약 50종목, 최대 1000종목까지 탐색
+        marcap_col_idx = None  # 헤더에서 탐색한 "시가총액" 컬럼의 td 인덱스 (페이지마다 동일 구조 가정)
 
-        def to_yf_ticker(row):
-            market = str(row.get("Market", "")).upper()
-            suffix = ".KQ" if "KOSDAQ" in market else ".KS"  # 기본은 KOSPI(.KS)
-            return f"{row['Code']}{suffix}"
+        while len(rows) < n and page <= max_pages:
+            url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok=0&page={page}"
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.encoding = "euc-kr"
+            soup = BeautifulSoup(resp.text, "html.parser")
 
-        df["ticker"] = df.apply(to_yf_ticker, axis=1)
-        df = df.rename(columns={"Name": "name", marcap_col: "market_cap"})
-        return df[["ticker", "name", "market_cap"]].reset_index(drop=True)
+            table = soup.select_one("table.type_2")
+            if table is None:
+                break
+
+            if marcap_col_idx is None:
+                header_ths = table.select("thead th") or table.select("tr th")
+                for idx, th in enumerate(header_ths):
+                    if "시가총액" in th.text:
+                        marcap_col_idx = idx
+                        break
+                if marcap_col_idx is None:
+                    raise ValueError("네이버 금융 페이지 구조가 변경된 것으로 보입니다 "
+                                      "('시가총액' 헤더를 찾지 못함). 코드 점검이 필요합니다.")
+
+            trs = table.select("tr")
+            page_rows_found = 0
+            for tr in trs:
+                link = tr.select_one("a.tltle")
+                if link is None:
+                    continue
+                href = link.get("href", "")
+                code_match = href.split("code=")
+                if len(code_match) < 2:
+                    continue
+                code = code_match[1][:6]
+                name = link.text.strip()
+
+                tds = tr.select("td")
+                try:
+                    marcap = float(tds[marcap_col_idx].text.strip().replace(",", ""))
+                except (ValueError, IndexError):
+                    continue
+
+                rows.append({"code": code, "name": name, "market_cap": marcap})
+                page_rows_found += 1
+
+            if page_rows_found == 0:
+                break
+            page += 1
+
+        if not rows:
+            raise ValueError("네이버 금융에서 시가총액 데이터를 가져오지 못했습니다. "
+                              "네트워크 상태를 확인하거나 잠시 후 다시 시도하세요.")
+
+        df = pd.DataFrame(rows).drop_duplicates(subset=["code"])
+        df = df.sort_values("market_cap", ascending=False).head(n).reset_index(drop=True)
+        # KOSPI(sosok=0)만 수집했으므로 전부 .KS. 코스닥 포함이 필요하면 sosok=1도 합쳐야 하나,
+        # 시가총액 상위 종목은 대부분 코스피이므로 기본값은 KOSPI로 충분한 경우가 많다.
+        df["ticker"] = df["code"] + ".KS"
+        return df[["ticker", "name", "market_cap"]]
 
     elif country == "US":
+        import FinanceDataReader as fdr
+
         frames = []
         for exch in ["NASDAQ", "NYSE", "AMEX"]:
             try:
