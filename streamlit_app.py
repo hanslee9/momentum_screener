@@ -20,7 +20,7 @@ st.markdown(
     "<h5 style='margin-bottom:0;'>📊 상대모멘텀 스크리너</h5>",
     unsafe_allow_html=True,
 )
-st.caption("시가총액 상위 N개 종목 중, 1/3/6/12개월 가중평균 수익률(40/30/20/10%) 상위 K개를 선별합니다.")
+st.caption("시가총액 상위 N개 종목 중, 1/3/6/12개월 가중평균 수익률(10/20/30/40%, 장기 비중 강화) 상위 K개를 선별합니다.")
 
 if "result" not in st.session_state:
     st.session_state.result = None  # 스크리닝 결과 전체를 여기에 저장
@@ -167,7 +167,7 @@ else:
         st.warning("시작일은 종료일보다 이전이어야 합니다.")
     else:
         try:
-            bt_tickers = list(top_k["ticker"]) 
+            bt_tickers = list(top_k["ticker"])
             bt_price_matrix = price_matrix
 
             # 비교용으로 추가한 종목 중, 기존 가격 데이터에 없는 것만 추가로 다운로드
