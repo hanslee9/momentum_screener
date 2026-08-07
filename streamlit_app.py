@@ -160,7 +160,8 @@ else:
         help="선정된 종목 외에 비교하고 싶은 종목을 티커로 입력하세요. 예: 005930.KS, AAPL",
         key="bt_extra_tickers",
     )
-    extra_tickers = [t.strip() for t in extra_input.split(",") if t.strip()]
+    # yfinance 티커는 대문자가 표준이므로 자동 변환 (005930.ks -> 005930.KS)
+    extra_tickers = [t.strip().upper() for t in extra_input.split(",") if t.strip()]
 
     if bt_start >= bt_end:
         st.warning("시작일은 종료일보다 이전이어야 합니다.")
@@ -174,11 +175,20 @@ else:
             if missing:
                 with st.spinner(f"비교 종목 가격 데이터 다운로드 중... ({', '.join(missing)})"):
                     from screener import fetch_price_matrix as _fetch
-                    extra_prices = _fetch(missing, lookback_days=lookback_days)
-                bt_price_matrix = bt_price_matrix.join(extra_prices, how="outer")
+                    try:
+                        extra_prices = _fetch(missing, lookback_days=lookback_days)
+                        bt_price_matrix = bt_price_matrix.join(extra_prices, how="outer")
+                    except Exception as fetch_err:
+                        st.warning(f"비교 종목 데이터를 가져오지 못했습니다: {fetch_err}")
+
+            # 다운로드 후에도 여전히 없는 티커는 제외하고, 어떤 티커가 빠졌는지 안내
+            still_missing = [t for t in extra_tickers if t not in bt_price_matrix.columns]
+            if still_missing:
+                st.warning(f"다음 티커는 데이터를 찾을 수 없어 백테스트에서 제외됩니다: {', '.join(still_missing)} "
+                            f"(티커 형식을 확인해주세요. 한국: 005930.KS, 미국: AAPL)")
 
             for t in extra_tickers:
-                if t not in bt_tickers:
+                if t not in bt_tickers and t in bt_price_matrix.columns:
                     bt_tickers.append(t)
 
             bt = run_simple_backtest(
